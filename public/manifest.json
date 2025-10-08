@@ -1,0 +1,52 @@
+{
+  "name": "ChronoTask Pro",
+  "short_name": "ChronoTask",
+  "description": "Professional task management with smart notifications",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#3b82f6",
+  "orientation": "portrait",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/icons/icon-72.png",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-96.png",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-128.png",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-144.png",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-152.png",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-192.png",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-384.png",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-maskable.png",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "categories": ["productivity", "business", "utilities"],
+  "lang": "en-US"
+}

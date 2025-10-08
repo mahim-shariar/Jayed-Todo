@@ -1,5 +1,5 @@
 // TodoApp.jsx
-// Industry-Grade React Todo Application with Completed-Only History
+// Industry-Grade React Todo Application with PWA & iOS Support
 // -------------------------------------------------------------------------
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -17,6 +17,13 @@ const NOTIFICATION_LEVELS = [
   { hours: 0.5, label: "30 minutes", color: "text-orange-600" },
   { hours: 10 / 60, label: "10 minutes", color: "text-red-600" },
 ];
+
+const PWA_CONFIG = {
+  appName: "ChronoTask Pro",
+  shortName: "ChronoTask",
+  themeColor: "#3b82f6",
+  backgroundColor: "#ffffff",
+};
 
 // ---------------------- Custom Hooks ----------------------
 
@@ -140,6 +147,210 @@ const useLiveTime = () => {
   }, []);
 
   return currentTime;
+};
+
+// PWA Hook
+const usePWA = () => {
+  const [isStandalone, setIsStandalone] = useState(false);
+  const [supportsPWA, setSupportsPWA] = useState(false);
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+
+  useEffect(() => {
+    // Check if app is running in standalone mode
+    setIsStandalone(
+      window.matchMedia("(display-mode: standalone)").matches ||
+        window.navigator.standalone === true
+    );
+
+    // Check for service worker and beforeinstallprompt support
+    setSupportsPWA(
+      "serviceWorker" in navigator && "BeforeInstallPromptEvent" in window
+    );
+
+    // Handle beforeinstallprompt event
+    const handleBeforeInstallPrompt = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+
+    // Handle app installed event
+    const handleAppInstalled = () => {
+      console.log("PWA was installed");
+      setDeferredPrompt(null);
+    };
+
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    window.addEventListener("appinstalled", handleAppInstalled);
+
+    // Register service worker
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker
+        .register("/sw.js")
+        .then((registration) => {
+          console.log("SW registered: ", registration);
+        })
+        .catch((registrationError) => {
+          console.log("SW registration failed: ", registrationError);
+        });
+    }
+
+    return () => {
+      window.removeEventListener(
+        "beforeinstallprompt",
+        handleBeforeInstallPrompt
+      );
+      window.removeEventListener("appinstalled", handleAppInstalled);
+    };
+  }, []);
+
+  const installPWA = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === "accepted") {
+        setDeferredPrompt(null);
+      }
+    }
+  };
+
+  return { isStandalone, supportsPWA, deferredPrompt, installPWA };
+};
+
+// Enhanced notification hook for iOS compatibility
+const useIOSNotifications = () => {
+  const [permission, setPermission] = useState("default");
+  const [isIOS, setIsIOS] = useState(false);
+
+  useEffect(() => {
+    // Detect iOS
+    const userAgent = window.navigator.userAgent.toLowerCase();
+    setIsIOS(/iphone|ipad|ipod/.test(userAgent));
+
+    // Check current permission
+    if ("Notification" in window) {
+      setPermission(Notification.permission);
+    }
+  }, []);
+
+  const requestPermission = async () => {
+    if (!("Notification" in window)) {
+      throw new Error("Notifications not supported");
+    }
+
+    // iOS-specific handling
+    if (isIOS) {
+      // On iOS, we need to request permission through a user gesture
+      const result = await Notification.requestPermission();
+      setPermission(result);
+
+      if (result === "granted") {
+        // Create a welcome notification
+        new Notification("🔔 ChronoTask Pro", {
+          body: "Notifications enabled! You will receive reminders for upcoming tasks.",
+          icon: "/icons/icon-192.png",
+          badge: "/icons/badge-72.png",
+          tag: "welcome",
+        });
+      }
+      return result;
+    } else {
+      // Standard permission request for other platforms
+      const result = await Notification.requestPermission();
+      setPermission(result);
+      return result;
+    }
+  };
+
+  const showNotification = (title, options = {}) => {
+    if (permission !== "granted") return null;
+
+    const notificationOptions = {
+      icon: "/icons/icon-192.png",
+      badge: "/icons/badge-72.png",
+      tag: "chronotask-reminder",
+      requireInteraction: true,
+      ...options,
+    };
+
+    // iOS-specific options
+    if (isIOS) {
+      notificationOptions.silent = false;
+      notificationOptions.vibrate = [200, 100, 200];
+    }
+
+    return new Notification(title, notificationOptions);
+  };
+
+  return { permission, isIOS, requestPermission, showNotification };
+};
+
+// Enhanced notification system
+const useEnhancedNotifications = (activeTasks) => {
+  const { permission, showNotification, isIOS } = useIOSNotifications();
+  const notificationCheckRef = useRef(null);
+  const notifiedTasksRef = useRef(new Set());
+
+  useEffect(() => {
+    if (permission !== "granted") return;
+
+    const checkNotifications = () => {
+      const now = new Date();
+
+      activeTasks.forEach((task) => {
+        if (task.dueUtc) {
+          const dueDate = new Date(task.dueUtc);
+          const timeLeft = dueDate - now;
+          const minutesLeft = Math.floor(timeLeft / (1000 * 60));
+
+          NOTIFICATION_LEVELS.forEach((level) => {
+            const thresholdMinutes = level.hours * 60;
+            const notificationKey = `task-${task.id}-${level.hours}`;
+
+            if (
+              minutesLeft <= thresholdMinutes &&
+              minutesLeft > thresholdMinutes - 1
+            ) {
+              if (!notifiedTasksRef.current.has(notificationKey)) {
+                // Use the enhanced notification system
+                showNotification(`⏰ ${level.label} reminder: ${task.title}`, {
+                  body: `Due: ${getBangladeshTime(task.dueUtc)}\nClient: ${
+                    task.clientName || "N/A"
+                  }`,
+                  tag: notificationKey,
+                  data: {
+                    taskId: task.id,
+                    type: "reminder",
+                    level: level.label,
+                  },
+                });
+
+                notifiedTasksRef.current.add(notificationKey);
+              }
+            }
+          });
+
+          // Clean up old notifications
+          if (minutesLeft > 5 * 60) {
+            NOTIFICATION_LEVELS.forEach((level) => {
+              const notificationKey = `task-${task.id}-${level.hours}`;
+              notifiedTasksRef.current.delete(notificationKey);
+            });
+          }
+        }
+      });
+    };
+
+    notificationCheckRef.current = setInterval(checkNotifications, 60000);
+    checkNotifications();
+
+    return () => {
+      if (notificationCheckRef.current) {
+        clearInterval(notificationCheckRef.current);
+      }
+    };
+  }, [activeTasks, permission, showNotification]);
+
+  return { permission };
 };
 
 // ---------------------- Utilities ----------------------
@@ -621,7 +832,7 @@ const HistoryPanel = ({ isOpen, onClose, tasks }) => {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 safe-area-inset">
       <div className="bg-white rounded-3xl shadow-2xl w-full max-w-6xl max-h-[80vh] flex flex-col">
         <div className="flex items-center justify-between p-6 border-b border-slate-200">
           <div>
@@ -1148,6 +1359,74 @@ const TaskItem = ({ task, onToggle, onEdit, onDelete, onUpdate }) => {
   );
 };
 
+// PWA Components
+const PWAInstallPrompt = ({
+  supportsPWA,
+  isStandalone,
+  deferredPrompt,
+  installPWA,
+}) => {
+  if (!supportsPWA || isStandalone || !deferredPrompt) return null;
+
+  return (
+    <div className="fixed bottom-4 left-4 right-4 bg-gradient-to-r from-blue-500 to-purple-600 text-white p-4 rounded-2xl shadow-2xl z-40 animate-bounce safe-area-inset">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="text-2xl">📱</div>
+          <div>
+            <div className="font-semibold">Install ChronoTask Pro</div>
+            <div className="text-sm text-blue-100">
+              Get the app experience with home screen access
+            </div>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={installPWA}
+            className="px-4 py-2 bg-white text-blue-600 rounded-xl font-semibold hover:bg-blue-50 transition-all duration-200"
+          >
+            Install
+          </button>
+          <button
+            onClick={() => {}}
+            className="px-4 py-2 text-white hover:bg-white hover:bg-opacity-20 rounded-xl transition-all duration-200"
+          >
+            Later
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const IOSInstallGuide = ({ isIOS, isStandalone }) => {
+  if (!isIOS || isStandalone) return null;
+
+  return (
+    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-6">
+      <div className="flex items-start gap-3">
+        <div className="text-2xl">📱</div>
+        <div className="flex-1">
+          <h4 className="font-semibold text-amber-800 mb-1">
+            Install ChronoTask Pro on your iPhone
+          </h4>
+          <p className="text-amber-700 text-sm mb-2">
+            For the best experience, add this app to your home screen:
+          </p>
+          <ol className="text-amber-700 text-sm list-decimal list-inside space-y-1">
+            <li>
+              Tap the Share button <span className="font-mono">⎗</span> at the
+              bottom
+            </li>
+            <li>Scroll down and tap "Add to Home Screen"</li>
+            <li>Tap "Add" in the top right corner</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ---------------------- Main Component ----------------------
 
 export default function TodoApp() {
@@ -1165,16 +1444,25 @@ export default function TodoApp() {
   const [isLoading, setIsLoading] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
 
-  const titleRef = useRef(null);
-  const debouncedQuery = useDebounce(query, 300);
-  const notificationCheckRef = useRef(null);
-  const notifiedTasksRef = useRef(new Set());
-  const currentTime = useLiveTime();
-
-  // Filter tasks to only show active tasks (not completed)
   const activeTasks = useMemo(() => {
     return tasks.filter((task) => !task.completed);
   }, [tasks]);
+
+  const titleRef = useRef(null);
+  const debouncedQuery = useDebounce(query, 300);
+
+  // PWA Hooks
+  const { isStandalone, supportsPWA, deferredPrompt, installPWA } = usePWA();
+  const {
+    permission: notificationPermission,
+    requestPermission,
+    isIOS,
+  } = useIOSNotifications();
+  const { permission: enhancedNotificationPermission } =
+    useEnhancedNotifications(activeTasks);
+  const currentTime = useLiveTime();
+
+  // Filter tasks to only show active tasks (not completed)
 
   // Find next upcoming task from active tasks only
   const nextUpcomingTask = useMemo(() => {
@@ -1193,68 +1481,6 @@ export default function TodoApp() {
   const removeToast = (id) => {
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
   };
-
-  // Enhanced notification system for active tasks only
-  useEffect(() => {
-    if (!("Notification" in window) || Notification.permission !== "granted") {
-      return;
-    }
-
-    const checkNotifications = () => {
-      const now = new Date();
-
-      activeTasks.forEach((task) => {
-        if (task.dueUtc) {
-          const dueDate = new Date(task.dueUtc);
-          const timeLeft = dueDate - now;
-          const minutesLeft = Math.floor(timeLeft / (1000 * 60));
-
-          NOTIFICATION_LEVELS.forEach((level) => {
-            const thresholdMinutes = level.hours * 60;
-            const notificationKey = `task-${task.id}-${level.hours}`;
-
-            if (
-              minutesLeft <= thresholdMinutes &&
-              minutesLeft > thresholdMinutes - 1
-            ) {
-              if (!notifiedTasksRef.current.has(notificationKey)) {
-                new Notification(`⏰ ${level.label} reminder: ${task.title}`, {
-                  body: `Due: ${getBangladeshTime(task.dueUtc)}\nClient: ${
-                    task.clientName || "N/A"
-                  }`,
-                  icon: "/todo-icon.png",
-                  tag: notificationKey,
-                  requireInteraction: true,
-                });
-
-                addToast(
-                  `"${task.title}" - ${level.label} remaining!`,
-                  "warning"
-                );
-                notifiedTasksRef.current.add(notificationKey);
-              }
-            }
-          });
-
-          if (minutesLeft > 5 * 60) {
-            NOTIFICATION_LEVELS.forEach((level) => {
-              const notificationKey = `task-${task.id}-${level.hours}`;
-              notifiedTasksRef.current.delete(notificationKey);
-            });
-          }
-        }
-      });
-    };
-
-    notificationCheckRef.current = setInterval(checkNotifications, 60000);
-    checkNotifications();
-
-    return () => {
-      if (notificationCheckRef.current) {
-        clearInterval(notificationCheckRef.current);
-      }
-    };
-  }, [activeTasks]);
 
   const filteredTasks = useMemo(() => {
     let arr = activeTasks.slice(); // Only show active tasks
@@ -1514,19 +1740,30 @@ export default function TodoApp() {
     }
 
     try {
-      const permission = await Notification.requestPermission();
-      if (permission === "granted") {
+      // Use the enhanced permission request
+      const result = await requestPermission();
+
+      if (result === "granted") {
         addToast("Notifications enabled successfully!", "success");
 
-        new Notification("🔔 ChronoTask Pro Notifications", {
-          body: "You'll receive smart reminders before tasks are due",
-          icon: "/todo-icon.png",
-        });
-      } else {
-        addToast("Notification permission denied", "warning");
+        // Show welcome notification
+        if ("Notification" in window && Notification.permission === "granted") {
+          new Notification("🔔 ChronoTask Pro", {
+            body: "You will receive smart reminders before tasks are due",
+            icon: "/icons/icon-192.png",
+            badge: "/icons/badge-72.png",
+            tag: "welcome",
+          });
+        }
+      } else if (result === "denied") {
+        addToast(
+          "Notifications blocked. Please enable them in your browser settings to receive reminders.",
+          "warning"
+        );
       }
     } catch (error) {
-      addToast("Failed to request notification permission", "error");
+      console.error("Notification error:", error);
+      addToast("Failed to enable notifications", "error");
     }
   };
 
@@ -1535,7 +1772,7 @@ export default function TodoApp() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50/30 p-4">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50/30 p-4 safe-area-inset">
       {/* Toast Container */}
       <div className="fixed top-4 right-4 z-50 space-y-2">
         {toasts.map((toast) => (
@@ -1547,6 +1784,17 @@ export default function TodoApp() {
           />
         ))}
       </div>
+
+      {/* PWA Install Prompt */}
+      <PWAInstallPrompt
+        supportsPWA={supportsPWA}
+        isStandalone={isStandalone}
+        deferredPrompt={deferredPrompt}
+        installPWA={installPWA}
+      />
+
+      {/* iOS Install Guide */}
+      <IOSInstallGuide isIOS={isIOS} isStandalone={isStandalone} />
 
       {/* History Panel */}
       <HistoryPanel
@@ -1792,10 +2040,31 @@ export default function TodoApp() {
               <div className="space-y-3">
                 <button
                   onClick={requestNotifications}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-left bg-blue-50 text-blue-700 rounded-xl hover:bg-blue-100 transition-all duration-200 border border-blue-200 hover:border-blue-300"
+                  disabled={notificationPermission === "granted"}
+                  className={`w-full flex items-center gap-3 px-4 py-3 text-left rounded-xl transition-all duration-200 border ${
+                    notificationPermission === "granted"
+                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                      : "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
+                  }`}
                 >
-                  <span className="text-lg">🔔</span>
-                  <span className="font-medium">Enable Notifications</span>
+                  <span className="text-lg">
+                    {notificationPermission === "granted" ? "🔔" : "🔕"}
+                  </span>
+                  <div className="flex-1">
+                    <div className="font-medium">
+                      {notificationPermission === "granted"
+                        ? "Notifications Enabled"
+                        : "Enable Notifications"}
+                    </div>
+                    {isIOS && notificationPermission !== "granted" && (
+                      <div className="text-xs opacity-75">
+                        Essential for task reminders on iOS
+                      </div>
+                    )}
+                  </div>
+                  {notificationPermission === "granted" && (
+                    <span className="text-emerald-500">✓</span>
+                  )}
                 </button>
 
                 <div className="grid grid-cols-2 gap-2">
@@ -1968,6 +2237,11 @@ export default function TodoApp() {
               {stats.completed} • Storage:{" "}
               <code className="text-xs">{STORAGE_KEY}</code>
             </p>
+            {isStandalone && (
+              <p className="text-emerald-600 font-medium mt-2">
+                📱 Running as Installed App
+              </p>
+            )}
           </div>
         </footer>
       </div>
