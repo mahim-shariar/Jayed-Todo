@@ -16,6 +16,7 @@ const NOTIFICATION_LEVELS = [
   { hours: 1, label: "1 hour", color: "text-purple-600" },
   { hours: 0.5, label: "30 minutes", color: "text-orange-600" },
   { hours: 10 / 60, label: "10 minutes", color: "text-red-600" },
+  { seconds: 10, label: "10 seconds", color: "text-rose-600" }, // Added 10 seconds reminder
 ];
 
 const PWA_CONFIG = {
@@ -284,7 +285,7 @@ const useIOSNotifications = () => {
   return { permission, isIOS, requestPermission, showNotification };
 };
 
-// Enhanced notification system
+// Enhanced notification system with 10-second final reminder
 const useEnhancedNotifications = (activeTasks) => {
   const { permission, showNotification, isIOS } = useIOSNotifications();
   const notificationCheckRef = useRef(null);
@@ -300,47 +301,84 @@ const useEnhancedNotifications = (activeTasks) => {
         if (task.dueUtc) {
           const dueDate = new Date(task.dueUtc);
           const timeLeft = dueDate - now;
+          const secondsLeft = Math.floor(timeLeft / 1000);
           const minutesLeft = Math.floor(timeLeft / (1000 * 60));
 
           NOTIFICATION_LEVELS.forEach((level) => {
-            const thresholdMinutes = level.hours * 60;
-            const notificationKey = `task-${task.id}-${level.hours}`;
+            let thresholdSeconds;
+            let notificationKey;
+
+            if (level.seconds !== undefined) {
+              // Handle seconds-based notifications (like 10 seconds)
+              thresholdSeconds = level.seconds;
+              notificationKey = `task-${task.id}-${level.seconds}s`;
+            } else {
+              // Handle minutes-based notifications (existing logic)
+              thresholdSeconds = level.hours * 3600;
+              notificationKey = `task-${task.id}-${level.hours}h`;
+            }
 
             if (
-              minutesLeft <= thresholdMinutes &&
-              minutesLeft > thresholdMinutes - 1
+              secondsLeft <= thresholdSeconds &&
+              secondsLeft > thresholdSeconds - 1
             ) {
               if (!notifiedTasksRef.current.has(notificationKey)) {
-                // Use the enhanced notification system
-                showNotification(`⏰ ${level.label} reminder: ${task.title}`, {
-                  body: `Due: ${getBangladeshTime(task.dueUtc)}\nClient: ${
-                    task.clientName || "N/A"
-                  }`,
-                  tag: notificationKey,
-                  data: {
-                    taskId: task.id,
-                    type: "reminder",
-                    level: level.label,
-                  },
-                });
+                // Special handling for 10-second reminder
+                if (level.seconds === 10) {
+                  showNotification(`🚨 FINAL REMINDER: ${task.title}`, {
+                    body: `ONLY 10 SECONDS LEFT! Complete this task immediately!\nClient: ${
+                      task.clientName || "N/A"
+                    }\nDue: ${getBangladeshTime(task.dueUtc)}`,
+                    tag: notificationKey,
+                    requireInteraction: true,
+                    vibrate: [500, 200, 500], // More intense vibration for final reminder
+                    icon: "/icons/icon-192.png",
+                    badge: "/icons/badge-72.png",
+                    data: {
+                      taskId: task.id,
+                      type: "final-reminder",
+                      level: "10-seconds",
+                    },
+                  });
+                } else {
+                  // Regular notifications for other time thresholds
+                  showNotification(
+                    `⏰ ${level.label} reminder: ${task.title}`,
+                    {
+                      body: `Due: ${getBangladeshTime(task.dueUtc)}\nClient: ${
+                        task.clientName || "N/A"
+                      }`,
+                      tag: notificationKey,
+                      data: {
+                        taskId: task.id,
+                        type: "reminder",
+                        level: level.label,
+                      },
+                    }
+                  );
+                }
 
                 notifiedTasksRef.current.add(notificationKey);
               }
             }
           });
 
-          // Clean up old notifications
-          if (minutesLeft > 5 * 60) {
+          // Clean up old notifications (keep for longer periods)
+          if (secondsLeft > 5 * 3600) {
+            // 5 hours
             NOTIFICATION_LEVELS.forEach((level) => {
-              const notificationKey = `task-${task.id}-${level.hours}`;
-              notifiedTasksRef.current.delete(notificationKey);
+              const key =
+                level.seconds !== undefined
+                  ? `task-${task.id}-${level.seconds}s`
+                  : `task-${task.id}-${level.hours}h`;
+              notifiedTasksRef.current.delete(key);
             });
           }
         }
       });
     };
 
-    notificationCheckRef.current = setInterval(checkNotifications, 60000);
+    notificationCheckRef.current = setInterval(checkNotifications, 1000); // Check every second for 10-second reminders
     checkNotifications();
 
     return () => {
@@ -367,7 +405,7 @@ const formatForDisplay = (iso, timeZone, includeSeconds = false) => {
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
-      hour12: false,
+      hour12: true, // Changed to 12-hour format
       timeZone: timeZone || "UTC",
     };
 
@@ -388,6 +426,14 @@ const getBangladeshTime = (iso) => {
 
 const getUtcTime = (iso) => {
   return formatForDisplay(iso, "UTC", true);
+};
+
+// Add new function to show time with timezone indicator
+const getTimeWithTimezone = (iso, timezone) => {
+  if (!iso) return "—";
+  const timeStr = formatForDisplay(iso, timezone, true);
+  const tzAbbr = timezone === BANGLADESH_TZ ? "BDT" : "UTC";
+  return `${timeStr} ${tzAbbr}`;
 };
 
 const datetimeLocalToUtcIso = (value, interpretAsUtc = true) => {
@@ -566,7 +612,7 @@ const LiveTimeDisplay = () => {
         <div className="flex items-center justify-center gap-2 mb-2">
           <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
           <h3 className="text-lg font-semibold text-slate-200">
-            Live Time Tracker
+            Live Time Tracker (12-hour format)
           </h3>
           <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
         </div>
@@ -578,7 +624,7 @@ const LiveTimeDisplay = () => {
             <div className="text-slate-300 text-sm font-medium">UTC Time</div>
           </div>
           <div className="text-2xl lg:text-3xl font-mono font-bold text-blue-300">
-            {getUtcTime(currentTime.utc)}
+            {getTimeWithTimezone(currentTime.utc, "UTC")}
           </div>
         </div>
         <div className="bg-slate-700 bg-opacity-50 rounded-2xl p-5 border border-slate-600 transition-all duration-300 hover:border-slate-500">
@@ -589,7 +635,16 @@ const LiveTimeDisplay = () => {
             </div>
           </div>
           <div className="text-2xl lg:text-3xl font-mono font-bold text-emerald-300">
-            {currentTime.bangladesh}
+            {getTimeWithTimezone(currentTime.utc, BANGLADESH_TZ)}
+          </div>
+        </div>
+      </div>
+      {/* Add local time display */}
+      <div className="mt-4 pt-4 border-t border-slate-600">
+        <div className="text-center">
+          <div className="text-slate-400 text-sm mb-2">Your Local Time</div>
+          <div className="text-xl font-mono font-semibold text-purple-300">
+            {formatForDisplay(currentTime.utc, BANGLADESH_TZ, true)}
           </div>
         </div>
       </div>
@@ -670,7 +725,11 @@ const CountdownTimer = ({ targetDate, taskTitle, compact = false }) => {
       return `${timeLeft.hours}h ${timeLeft.minutes}m`;
     }
 
-    return `${timeLeft.minutes}m ${timeLeft.seconds}s`;
+    if (timeLeft.minutes > 0) {
+      return `${timeLeft.minutes}m ${timeLeft.seconds}s`;
+    }
+
+    return `${timeLeft.seconds}s`; // Show seconds when less than a minute
   };
 
   if (compact) {
@@ -756,7 +815,17 @@ const QuickTimeButtons = ({ onTimeSelect, currentValue }) => {
                   : "text-slate-500"
               }`}
             >
-              BD: {time.display}
+              BD: {getTimeWithTimezone(time.value.toISOString(), BANGLADESH_TZ)}
+            </div>
+            <div
+              className={`text-xs ${
+                currentValue ===
+                utcIsoToLocalInputValue(time.value.toISOString())
+                  ? "text-blue-600"
+                  : "text-slate-400"
+              }`}
+            >
+              UTC: {getTimeWithTimezone(time.value.toISOString(), "UTC")}
             </div>
           </button>
         ))}
@@ -796,14 +865,19 @@ const HistoryPanel = ({ isOpen, onClose, tasks }) => {
     }
   }, [isOpen]);
 
+  // Unified clear history function
   const clearHistory = () => {
     if (
       window.confirm(
-        "Are you sure you want to clear all completed task history? This action cannot be undone."
+        "Are you sure you want to clear ALL completed task history permanently? This action cannot be undone and will remove all your completed task records."
       )
     ) {
       localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify([]));
       setHistory([]);
+      // Show success message
+      if (window.showToast) {
+        window.showToast("All history cleared permanently", "success");
+      }
     }
   };
 
@@ -841,19 +915,36 @@ const HistoryPanel = ({ isOpen, onClose, tasks }) => {
             </h2>
             <div className="flex flex-wrap gap-4 mt-2 text-sm text-slate-600">
               <span>
-                UTC: <strong>{getUtcTime(currentTime.utc)}</strong>
+                UTC:{" "}
+                <strong>{getTimeWithTimezone(currentTime.utc, "UTC")}</strong>
               </span>
               <span>
-                Bangladesh: <strong>{currentTime.bangladesh}</strong>
+                Bangladesh:{" "}
+                <strong>
+                  {getTimeWithTimezone(currentTime.utc, BANGLADESH_TZ)}
+                </strong>
               </span>
             </div>
           </div>
           <div className="flex gap-2">
             <button
               onClick={clearHistory}
-              className="px-4 py-2 text-rose-600 hover:bg-rose-50 rounded-xl transition-all duration-200 font-medium"
+              className="px-4 py-2 bg-rose-500 text-white rounded-xl hover:bg-rose-600 transition-all duration-200 font-medium flex items-center gap-2"
             >
-              Clear History
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                />
+              </svg>
+              Clear All History
             </button>
             <button
               onClick={onClose}
@@ -915,7 +1006,7 @@ const HistoryPanel = ({ isOpen, onClose, tasks }) => {
                         Completed
                       </span>
                       <span className="text-sm text-slate-500">
-                        {getBangladeshTime(entry.completedAt)}
+                        {getTimeWithTimezone(entry.completedAt, BANGLADESH_TZ)}
                       </span>
                     </div>
 
@@ -948,11 +1039,14 @@ const HistoryPanel = ({ isOpen, onClose, tasks }) => {
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-slate-500">
                         <div>
                           <span className="font-medium">Original Due:</span>{" "}
-                          {getBangladeshTime(entry.dueUtc)}
+                          {getTimeWithTimezone(entry.dueUtc, BANGLADESH_TZ)}
                         </div>
                         <div>
                           <span className="font-medium">Completed:</span>{" "}
-                          {getBangladeshTime(entry.completedAt)}
+                          {getTimeWithTimezone(
+                            entry.completedAt,
+                            BANGLADESH_TZ
+                          )}
                         </div>
                       </div>
                     </div>
@@ -968,10 +1062,14 @@ const HistoryPanel = ({ isOpen, onClose, tasks }) => {
             <span>Showing {history.length} completed tasks</span>
             <div className="flex gap-4">
               <span>
-                UTC: <strong>{getUtcTime(currentTime.utc)}</strong>
+                UTC:{" "}
+                <strong>{getTimeWithTimezone(currentTime.utc, "UTC")}</strong>
               </span>
               <span>
-                BD: <strong>{currentTime.bangladesh}</strong>
+                BD:{" "}
+                <strong>
+                  {getTimeWithTimezone(currentTime.utc, BANGLADESH_TZ)}
+                </strong>
               </span>
             </div>
           </div>
@@ -1243,7 +1341,7 @@ const TaskItem = ({ task, onToggle, onEdit, onDelete, onUpdate }) => {
                       <div className="space-y-4">
                         <div>
                           <h4 className="font-semibold text-slate-900 mb-3">
-                            Time Information
+                            Time Information (12-hour format)
                           </h4>
                           <div className="space-y-3">
                             <div className="flex justify-between items-center p-3 bg-white rounded-lg border border-slate-200">
@@ -1251,7 +1349,7 @@ const TaskItem = ({ task, onToggle, onEdit, onDelete, onUpdate }) => {
                                 UTC Time
                               </span>
                               <span className="font-mono text-sm font-semibold text-slate-900">
-                                {getUtcTime(task.dueUtc)}
+                                {getTimeWithTimezone(task.dueUtc, "UTC")}
                               </span>
                             </div>
                             <div className="flex justify-between items-center p-3 bg-white rounded-lg border border-slate-200">
@@ -1259,7 +1357,10 @@ const TaskItem = ({ task, onToggle, onEdit, onDelete, onUpdate }) => {
                                 Bangladesh Time
                               </span>
                               <span className="font-mono text-sm font-semibold text-emerald-600">
-                                {getBangladeshTime(task.dueUtc)}
+                                {getTimeWithTimezone(
+                                  task.dueUtc,
+                                  BANGLADESH_TZ
+                                )}
                               </span>
                             </div>
                             <div className="flex justify-between items-center p-3 bg-white rounded-lg border border-slate-200">
@@ -1267,7 +1368,11 @@ const TaskItem = ({ task, onToggle, onEdit, onDelete, onUpdate }) => {
                                 Your Local Time
                               </span>
                               <span className="font-mono text-sm font-semibold text-blue-600">
-                                {formatForDisplay(task.dueUtc, undefined, true)}
+                                {formatForDisplay(
+                                  task.dueUtc,
+                                  BANGLADESH_TZ,
+                                  true
+                                )}
                               </span>
                             </div>
                           </div>
@@ -1462,8 +1567,6 @@ export default function TodoApp() {
     useEnhancedNotifications(activeTasks);
   const currentTime = useLiveTime();
 
-  // Filter tasks to only show active tasks (not completed)
-
   // Find next upcoming task from active tasks only
   const nextUpcomingTask = useMemo(() => {
     const upcoming = activeTasks
@@ -1546,6 +1649,30 @@ export default function TodoApp() {
     }),
     [tasks, activeTasks]
   );
+
+  // Unified clear history function
+  const clearCompleted = () => {
+    if (
+      window.confirm(
+        "Are you sure you want to clear ALL completed task history permanently? This action cannot be undone and will remove all your completed task records."
+      )
+    ) {
+      const completedTasks = tasks.filter((task) => task.completed);
+      setTasks((prev) => prev.filter((task) => !task.completed));
+
+      // Clear the history storage as well
+      localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify([]));
+
+      completedTasks.forEach((task) => {
+        addToHistory("deleted", task);
+      });
+
+      addToast(
+        "All completed tasks and history cleared permanently",
+        "success"
+      );
+    }
+  };
 
   const addTask = async (e) => {
     if (e) e.preventDefault();
@@ -1637,17 +1764,6 @@ export default function TodoApp() {
     }
 
     addToast("Task deleted", "info");
-  };
-
-  const clearCompleted = () => {
-    const completedTasks = tasks.filter((task) => task.completed);
-    setTasks((prev) => prev.filter((task) => !task.completed));
-
-    completedTasks.forEach((task) => {
-      addToHistory("deleted", task);
-    });
-
-    addToast("Completed tasks cleared from history", "success");
   };
 
   const exportJson = () => {
@@ -1851,7 +1967,11 @@ export default function TodoApp() {
                     </div>
                   )}
                   <p className="text-blue-100">
-                    Due: {getBangladeshTime(nextUpcomingTask.dueUtc)}
+                    Due:{" "}
+                    {getTimeWithTimezone(
+                      nextUpcomingTask.dueUtc,
+                      BANGLADESH_TZ
+                    )}
                   </p>
                 </div>
                 <CountdownTimer
@@ -1980,8 +2100,25 @@ export default function TodoApp() {
 
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-2">
-                    Due Date & Time
+                    Due Date & Time (UTC)
                   </label>
+
+                  {/* Timezone Info Banner */}
+                  <div className="mb-3 p-3 bg-blue-50 border border-blue-200 rounded-xl">
+                    <div className="flex items-center gap-2 text-sm text-blue-700">
+                      <span>⏰</span>
+                      <div>
+                        <strong>Setting UTC Time</strong> - This will be
+                        converted to your local time for display
+                        <div className="text-xs opacity-75 mt-1">
+                          Current UTC: {getTimeWithTimezone(nowUtcIso(), "UTC")}{" "}
+                          | Your Local:{" "}
+                          {formatForDisplay(nowUtcIso(), BANGLADESH_TZ, true)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
                   <input
                     type="datetime-local"
                     value={dueLocalInputValue}
@@ -1989,6 +2126,59 @@ export default function TodoApp() {
                     className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 mb-3 bg-white/50"
                     disabled={isLoading}
                   />
+
+                  {/* Preview of selected time */}
+                  {dueLocalInputValue && (
+                    <div className="mb-3 p-3 bg-slate-50 rounded-xl border border-slate-200">
+                      <div className="text-sm text-slate-700">
+                        <div className="font-medium mb-2">
+                          Selected Time Preview:
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
+                            <span>
+                              UTC:{" "}
+                              {getTimeWithTimezone(
+                                datetimeLocalToUtcIso(
+                                  dueLocalInputValue,
+                                  interpretAsUtc
+                                ),
+                                "UTC"
+                              )}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="w-2 h-2 bg-emerald-500 rounded-full"></span>
+                            <span>
+                              Bangladesh:{" "}
+                              {getTimeWithTimezone(
+                                datetimeLocalToUtcIso(
+                                  dueLocalInputValue,
+                                  interpretAsUtc
+                                ),
+                                BANGLADESH_TZ
+                              )}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="w-2 h-2 bg-purple-500 rounded-full"></span>
+                            <span>
+                              Your Local:{" "}
+                              {formatForDisplay(
+                                datetimeLocalToUtcIso(
+                                  dueLocalInputValue,
+                                  interpretAsUtc
+                                ),
+                                BANGLADESH_TZ,
+                                true
+                              )}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   <QuickTimeButtons
                     onTimeSelect={handleQuickTimeSelect}
@@ -2092,10 +2282,22 @@ export default function TodoApp() {
                   <button
                     onClick={clearCompleted}
                     disabled={stats.completed === 0}
-                    className="flex items-center gap-2 px-3 py-2 bg-amber-50 text-amber-700 rounded-lg hover:bg-amber-100 transition-all duration-200 border border-amber-200 text-sm font-medium disabled:opacity-50"
+                    className="flex items-center gap-2 px-3 py-2 bg-rose-50 text-rose-700 rounded-lg hover:bg-rose-100 transition-all duration-200 border border-rose-200 text-sm font-medium disabled:opacity-50"
                   >
-                    <span>🧹</span>
-                    Clear History
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                      />
+                    </svg>
+                    Clear All History
                   </button>
 
                   <button
@@ -2218,7 +2420,7 @@ export default function TodoApp() {
                 <span>
                   Live UTC:{" "}
                   <strong className="font-mono">
-                    {getUtcTime(currentTime.utc)}
+                    {getTimeWithTimezone(currentTime.utc, "UTC")}
                   </strong>
                 </span>
               </div>
@@ -2227,7 +2429,7 @@ export default function TodoApp() {
                 <span>
                   Live Bangladesh:{" "}
                   <strong className="font-mono">
-                    {currentTime.bangladesh}
+                    {getTimeWithTimezone(currentTime.utc, BANGLADESH_TZ)}
                   </strong>
                 </span>
               </div>
