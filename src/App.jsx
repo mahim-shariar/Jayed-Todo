@@ -3,20 +3,21 @@
 // -------------------------------------------------------------------------
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import Push from "push.js";
 
 // ---------------------- Constants ----------------------
 
 const STORAGE_KEY = "todoapp.tasks.pro";
 const HISTORY_STORAGE_KEY = "todoapp.history.pro";
 const APP_TITLE = "ChronoTask Pro";
-const BANGLADESH_TZ = "Asia/Dhaka";
 const NOTIFICATION_LEVELS = [
   { hours: 5, label: "5 hours", color: "text-blue-600" },
   { hours: 2, label: "2 hours", color: "text-indigo-600" },
   { hours: 1, label: "1 hour", color: "text-purple-600" },
   { hours: 0.5, label: "30 minutes", color: "text-orange-600" },
   { hours: 10 / 60, label: "10 minutes", color: "text-red-600" },
-  { seconds: 10, label: "10 seconds", color: "text-rose-600" }, // Added 10 seconds reminder
+  { seconds: 30, label: "30 seconds", color: "text-rose-600" },
+  { seconds: 10, label: "10 seconds", color: "text-rose-600" },
 ];
 
 const PWA_CONFIG = {
@@ -128,16 +129,20 @@ const useLiveTime = () => {
   const [currentTime, setCurrentTime] = useState({
     utc: new Date().toISOString(),
     local: new Date(),
-    bangladesh: "",
+    userLocalTime: "",
+    userTimezone: "",
   });
 
   useEffect(() => {
     const updateTime = () => {
       const now = new Date();
+      const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
       setCurrentTime({
         utc: now.toISOString(),
         local: now,
-        bangladesh: formatForDisplay(now.toISOString(), BANGLADESH_TZ, true),
+        userLocalTime: formatForDisplay(now.toISOString(), userTimezone, true),
+        userTimezone: userTimezone,
       });
     };
 
@@ -217,168 +222,211 @@ const usePWA = () => {
   return { isStandalone, supportsPWA, deferredPrompt, installPWA };
 };
 
-// Enhanced notification hook for iOS compatibility
-const useIOSNotifications = () => {
+// Enhanced Push.js Notification Hook
+const usePushNotifications = () => {
   const [permission, setPermission] = useState("default");
+  const [isSupported, setIsSupported] = useState(true);
   const [isIOS, setIsIOS] = useState(false);
 
   useEffect(() => {
+    // Check if Push.js is supported
+    const pushSupported = typeof Push !== "undefined" && Push.Permission.has();
+    setIsSupported(pushSupported);
+
+    // Set initial permission state
+    if (pushSupported) {
+      setPermission(Push.Permission.get());
+    } else if ("Notification" in window) {
+      setPermission(Notification.permission);
+    }
+
     // Detect iOS
     const userAgent = window.navigator.userAgent.toLowerCase();
     setIsIOS(/iphone|ipad|ipod/.test(userAgent));
-
-    // Check current permission
-    if ("Notification" in window) {
-      setPermission(Notification.permission);
-    }
   }, []);
 
   const requestPermission = async () => {
-    if (!("Notification" in window)) {
-      throw new Error("Notifications not supported");
-    }
-
-    // iOS-specific handling
-    if (isIOS) {
-      // On iOS, we need to request permission through a user gesture
-      const result = await Notification.requestPermission();
-      setPermission(result);
-
-      if (result === "granted") {
-        // Create a welcome notification
-        new Notification("🔔 ChronoTask Pro", {
-          body: "Notifications enabled! You will receive reminders for upcoming tasks.",
-          icon: "/icons/icon-192.png",
-          badge: "/icons/badge-72.png",
-          tag: "welcome",
-        });
+    try {
+      if (typeof Push !== "undefined" && Push.Permission.has()) {
+        await Push.Permission.request();
+        const newPermission = Push.Permission.get();
+        setPermission(newPermission);
+        return newPermission;
+      } else if ("Notification" in window) {
+        const result = await Notification.requestPermission();
+        setPermission(result);
+        return result;
       }
-      return result;
-    } else {
-      // Standard permission request for other platforms
-      const result = await Notification.requestPermission();
-      setPermission(result);
-      return result;
+    } catch (error) {
+      console.error("Permission request failed:", error);
     }
+    return "denied";
   };
 
   const showNotification = (title, options = {}) => {
-    if (permission !== "granted") return null;
-
-    const notificationOptions = {
-      icon: "/icons/icon-192.png",
-      badge: "/icons/badge-72.png",
-      tag: "chronotask-reminder",
-      requireInteraction: true,
-      ...options,
-    };
-
-    // iOS-specific options
-    if (isIOS) {
-      notificationOptions.silent = false;
-      notificationOptions.vibrate = [200, 100, 200];
+    if (permission !== "granted") {
+      console.warn("Cannot show notification: Permission not granted");
+      return null;
     }
 
-    return new Notification(title, notificationOptions);
+    const defaultOptions = {
+      icon: "/icons/icon-192.png",
+      timeout: 5000,
+      onClick: () => {
+        window.focus();
+        // You can add custom click handling here
+      },
+    };
+
+    // Use Push.js if available, fallback to native API
+    if (typeof Push !== "undefined" && Push.Permission.has()) {
+      return Push.create(title, {
+        ...defaultOptions,
+        ...options,
+      });
+    } else if ("Notification" in window) {
+      // iOS-specific options for native notifications
+      const nativeOptions = { ...defaultOptions, ...options };
+      if (isIOS) {
+        nativeOptions.silent = false;
+        nativeOptions.vibrate = [200, 100, 200];
+      }
+      return new Notification(title, nativeOptions);
+    }
+
+    return null;
   };
 
-  return { permission, isIOS, requestPermission, showNotification };
+  // Specialized notification methods for your Todo app
+  const showTaskReminder = (task, timeLeft) => {
+    let config = {};
+
+    if (timeLeft <= 10) {
+      config = {
+        body: `🚨 ONLY 10 SECONDS LEFT!\nClient: ${
+          task.clientName || "N/A"
+        }\nDue: ${formatForDisplay(task.dueUtc, "UTC", true)}`,
+        icon: "/icons/urgent.png",
+        tag: `urgent-${task.id}`,
+        requireInteraction: true,
+        timeout: 0, // Don't auto-close urgent notifications
+      };
+    } else if (timeLeft <= 30) {
+      config = {
+        body: `⚠️ 30 seconds left\nClient: ${task.clientName || "N/A"}`,
+        icon: "/icons/warning.png",
+        tag: `warning-${task.id}`,
+        timeout: 10000, // 10 seconds
+      };
+    } else {
+      config = {
+        body: `Due: ${formatForDisplay(task.dueUtc, "UTC", true)}\nClient: ${
+          task.clientName || "N/A"
+        }`,
+        icon: "/icons/reminder.png",
+        tag: `reminder-${task.id}`,
+      };
+    }
+
+    return showNotification(`⏰ ${task.title}`, config);
+  };
+
+  const showTaskCompleted = (task) => {
+    return showNotification("✅ Task Completed", {
+      body: `"${task.title}" has been completed!`,
+      icon: "/icons/completed.png",
+      tag: `completed-${task.id}`,
+    });
+  };
+
+  const testNotification = () => {
+    if (permission !== "granted") {
+      console.warn("Please enable notifications first");
+      return;
+    }
+
+    // Test different notification types
+    showNotification("🔔 Test - Urgent Task", {
+      body: "This is an urgent notification test",
+      icon: "/icons/urgent.png",
+      requireInteraction: true,
+      timeout: 0,
+    });
+
+    setTimeout(() => {
+      showNotification("⏰ Test - Regular Reminder", {
+        body: "This is a regular reminder test",
+        icon: "/icons/reminder.png",
+      });
+    }, 1000);
+  };
+
+  return {
+    permission,
+    isSupported,
+    isIOS,
+    requestPermission,
+    showNotification,
+    showTaskReminder,
+    showTaskCompleted,
+    testNotification,
+  };
 };
 
-// Enhanced notification system with 10-second final reminder
+// Enhanced notification system with Push.js
 const useEnhancedNotifications = (activeTasks) => {
-  const { permission, showNotification, isIOS } = useIOSNotifications();
+  const { permission, showTaskReminder, isSupported } = usePushNotifications();
+
   const notificationCheckRef = useRef(null);
   const notifiedTasksRef = useRef(new Set());
 
   useEffect(() => {
-    if (permission !== "granted") return;
+    if (permission !== "granted" || !isSupported) return;
 
     const checkNotifications = () => {
       const now = new Date();
 
       activeTasks.forEach((task) => {
-        if (task.dueUtc) {
+        if (task.dueUtc && !task.completed) {
           const dueDate = new Date(task.dueUtc);
           const timeLeft = dueDate - now;
           const secondsLeft = Math.floor(timeLeft / 1000);
-          const minutesLeft = Math.floor(timeLeft / (1000 * 60));
 
           NOTIFICATION_LEVELS.forEach((level) => {
             let thresholdSeconds;
             let notificationKey;
 
             if (level.seconds !== undefined) {
-              // Handle seconds-based notifications (like 10 seconds)
               thresholdSeconds = level.seconds;
               notificationKey = `task-${task.id}-${level.seconds}s`;
             } else {
-              // Handle minutes-based notifications (existing logic)
               thresholdSeconds = level.hours * 3600;
               notificationKey = `task-${task.id}-${level.hours}h`;
             }
 
             if (
               secondsLeft <= thresholdSeconds &&
-              secondsLeft > thresholdSeconds - 1
+              secondsLeft > thresholdSeconds - 60 &&
+              !notifiedTasksRef.current.has(notificationKey)
             ) {
-              if (!notifiedTasksRef.current.has(notificationKey)) {
-                // Special handling for 10-second reminder
-                if (level.seconds === 10) {
-                  showNotification(`🚨 FINAL REMINDER: ${task.title}`, {
-                    body: `ONLY 10 SECONDS LEFT! Complete this task immediately!\nClient: ${
-                      task.clientName || "N/A"
-                    }\nDue: ${getBangladeshTime(task.dueUtc)}`,
-                    tag: notificationKey,
-                    requireInteraction: true,
-                    vibrate: [500, 200, 500], // More intense vibration for final reminder
-                    icon: "/icons/icon-192.png",
-                    badge: "/icons/badge-72.png",
-                    data: {
-                      taskId: task.id,
-                      type: "final-reminder",
-                      level: "10-seconds",
-                    },
-                  });
-                } else {
-                  // Regular notifications for other time thresholds
-                  showNotification(
-                    `⏰ ${level.label} reminder: ${task.title}`,
-                    {
-                      body: `Due: ${getBangladeshTime(task.dueUtc)}\nClient: ${
-                        task.clientName || "N/A"
-                      }`,
-                      tag: notificationKey,
-                      data: {
-                        taskId: task.id,
-                        type: "reminder",
-                        level: level.label,
-                      },
-                    }
-                  );
-                }
+              console.log(`Triggering notification: ${notificationKey}`);
 
-                notifiedTasksRef.current.add(notificationKey);
-              }
+              // Use the enhanced Push.js notification
+              showTaskReminder(task, secondsLeft);
+
+              notifiedTasksRef.current.add(notificationKey);
+
+              // Clean up after due date
+              setTimeout(() => {
+                notifiedTasksRef.current.delete(notificationKey);
+              }, Math.abs(timeLeft) + 5000);
             }
           });
-
-          // Clean up old notifications (keep for longer periods)
-          if (secondsLeft > 5 * 3600) {
-            // 5 hours
-            NOTIFICATION_LEVELS.forEach((level) => {
-              const key =
-                level.seconds !== undefined
-                  ? `task-${task.id}-${level.seconds}s`
-                  : `task-${task.id}-${level.hours}h`;
-              notifiedTasksRef.current.delete(key);
-            });
-          }
         }
       });
     };
 
-    notificationCheckRef.current = setInterval(checkNotifications, 1000); // Check every second for 10-second reminders
+    notificationCheckRef.current = setInterval(checkNotifications, 5000);
     checkNotifications();
 
     return () => {
@@ -386,9 +434,12 @@ const useEnhancedNotifications = (activeTasks) => {
         clearInterval(notificationCheckRef.current);
       }
     };
-  }, [activeTasks, permission, showNotification]);
+  }, [activeTasks, permission, showTaskReminder, isSupported]);
 
-  return { permission };
+  return {
+    permission,
+    isSupported,
+  };
 };
 
 // ---------------------- Utilities ----------------------
@@ -405,7 +456,7 @@ const formatForDisplay = (iso, timeZone, includeSeconds = false) => {
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
-      hour12: true, // Changed to 12-hour format
+      hour12: true,
       timeZone: timeZone || "UTC",
     };
 
@@ -420,23 +471,15 @@ const formatForDisplay = (iso, timeZone, includeSeconds = false) => {
   }
 };
 
-const getBangladeshTime = (iso) => {
-  return formatForDisplay(iso, BANGLADESH_TZ, true);
-};
-
-const getUtcTime = (iso) => {
-  return formatForDisplay(iso, "UTC", true);
-};
-
-// Add new function to show time with timezone indicator
 const getTimeWithTimezone = (iso, timezone) => {
   if (!iso) return "—";
   const timeStr = formatForDisplay(iso, timezone, true);
-  const tzAbbr = timezone === BANGLADESH_TZ ? "BDT" : "UTC";
-  return `${timeStr} ${tzAbbr}`;
+  const tzAbbr = timezone === "UTC" ? "UTC" : "";
+  return `${timeStr} ${tzAbbr}`.trim();
 };
 
-const datetimeLocalToUtcIso = (value, interpretAsUtc = true) => {
+// FIXED: Proper UTC datetime handling
+const datetimeLocalToUtcIso = (value) => {
   if (!value) return "";
 
   try {
@@ -458,13 +501,9 @@ const datetimeLocalToUtcIso = (value, interpretAsUtc = true) => {
       throw new Error("Invalid numeric values in datetime");
     }
 
-    if (interpretAsUtc) {
-      const ms = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
-      return new Date(ms).toISOString();
-    }
-
-    const localDate = new Date(year, month - 1, day, hour, minute, 0, 0);
-    return localDate.toISOString();
+    // Always interpret as UTC - create UTC date directly
+    const ms = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+    return new Date(ms).toISOString();
   } catch (error) {
     throw new Error(`Failed to parse datetime: ${error.message}`);
   }
@@ -516,52 +555,6 @@ const addToHistory = (action, task, oldValue = null, newValue = null) => {
   } catch (error) {
     console.error("Failed to save history:", error);
   }
-};
-
-const getQuickTimes = () => {
-  const now = new Date();
-  return [
-    {
-      label: "1 hour",
-      value: new Date(now.getTime() + 60 * 60 * 1000),
-      display: getBangladeshTime(
-        new Date(now.getTime() + 60 * 60 * 1000).toISOString()
-      ),
-      icon: "⏱️",
-    },
-    {
-      label: "2 hours",
-      value: new Date(now.getTime() + 2 * 60 * 60 * 1000),
-      display: getBangladeshTime(
-        new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString()
-      ),
-      icon: "🕑",
-    },
-    {
-      label: "5 hours",
-      value: new Date(now.getTime() + 5 * 60 * 60 * 1000),
-      display: getBangladeshTime(
-        new Date(now.getTime() + 5 * 60 * 60 * 1000).toISOString()
-      ),
-      icon: "🕔",
-    },
-    {
-      label: "Tomorrow",
-      value: new Date(now.getTime() + 24 * 60 * 60 * 1000),
-      display: getBangladeshTime(
-        new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString()
-      ),
-      icon: "🌅",
-    },
-    {
-      label: "Next week",
-      value: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
-      display: getBangladeshTime(
-        new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString()
-      ),
-      icon: "📅",
-    },
-  ];
 };
 
 // ---------------------- Components ----------------------
@@ -621,30 +614,29 @@ const LiveTimeDisplay = () => {
         <div className="bg-slate-700 bg-opacity-50 rounded-2xl p-5 border border-slate-600 transition-all duration-300 hover:border-slate-500">
           <div className="flex items-center gap-3 mb-3">
             <div className="w-3 h-3 bg-blue-400 rounded-full animate-pulse"></div>
-            <div className="text-slate-300 text-sm font-medium">UTC Time</div>
+            <div className="text-slate-300 text-sm font-medium">
+              UTC Time (Global Standard)
+            </div>
           </div>
           <div className="text-2xl lg:text-3xl font-mono font-bold text-blue-300">
             {getTimeWithTimezone(currentTime.utc, "UTC")}
+          </div>
+          <div className="text-xs text-slate-400 mt-2">
+            All tasks are stored and managed in UTC
           </div>
         </div>
         <div className="bg-slate-700 bg-opacity-50 rounded-2xl p-5 border border-slate-600 transition-all duration-300 hover:border-slate-500">
           <div className="flex items-center gap-3 mb-3">
             <div className="w-3 h-3 bg-emerald-400 rounded-full animate-pulse"></div>
             <div className="text-slate-300 text-sm font-medium">
-              Bangladesh (Asia/Dhaka)
+              Your Local Time ({currentTime.userTimezone})
             </div>
           </div>
           <div className="text-2xl lg:text-3xl font-mono font-bold text-emerald-300">
-            {getTimeWithTimezone(currentTime.utc, BANGLADESH_TZ)}
+            {currentTime.userLocalTime}
           </div>
-        </div>
-      </div>
-      {/* Add local time display */}
-      <div className="mt-4 pt-4 border-t border-slate-600">
-        <div className="text-center">
-          <div className="text-slate-400 text-sm mb-2">Your Local Time</div>
-          <div className="text-xl font-mono font-semibold text-purple-300">
-            {formatForDisplay(currentTime.utc, BANGLADESH_TZ, true)}
+          <div className="text-xs text-slate-400 mt-2">
+            Automatically detected from your device
           </div>
         </div>
       </div>
@@ -729,7 +721,7 @@ const CountdownTimer = ({ targetDate, taskTitle, compact = false }) => {
       return `${timeLeft.minutes}m ${timeLeft.seconds}s`;
     }
 
-    return `${timeLeft.seconds}s`; // Show seconds when less than a minute
+    return `${timeLeft.seconds}s`;
   };
 
   if (compact) {
@@ -770,76 +762,6 @@ const CountdownTimer = ({ targetDate, taskTitle, compact = false }) => {
           {timerConfig.label}
         </div>
       </div>
-    </div>
-  );
-};
-
-const QuickTimeButtons = ({ onTimeSelect, currentValue }) => {
-  const quickTimes = getQuickTimes();
-  const [showAll, setShowAll] = useState(false);
-
-  const visibleTimes = showAll ? quickTimes : quickTimes.slice(0, 3);
-
-  return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-2">
-        {visibleTimes.map((time, index) => (
-          <button
-            key={index}
-            type="button"
-            onClick={() => onTimeSelect(time.value)}
-            className={`p-3 rounded-xl border-2 transition-all duration-300 text-left group hover:scale-105 active:scale-95 ${
-              currentValue === utcIsoToLocalInputValue(time.value.toISOString())
-                ? "border-blue-500 bg-blue-50 shadow-lg shadow-blue-500/20"
-                : "border-slate-200 bg-white hover:border-slate-300 hover:shadow-lg"
-            }`}
-          >
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-lg">{time.icon}</span>
-              <span
-                className={`font-semibold text-sm ${
-                  currentValue ===
-                  utcIsoToLocalInputValue(time.value.toISOString())
-                    ? "text-blue-700"
-                    : "text-slate-700"
-                }`}
-              >
-                {time.label}
-              </span>
-            </div>
-            <div
-              className={`text-xs ${
-                currentValue ===
-                utcIsoToLocalInputValue(time.value.toISOString())
-                  ? "text-blue-600"
-                  : "text-slate-500"
-              }`}
-            >
-              BD: {getTimeWithTimezone(time.value.toISOString(), BANGLADESH_TZ)}
-            </div>
-            <div
-              className={`text-xs ${
-                currentValue ===
-                utcIsoToLocalInputValue(time.value.toISOString())
-                  ? "text-blue-600"
-                  : "text-slate-400"
-              }`}
-            >
-              UTC: {getTimeWithTimezone(time.value.toISOString(), "UTC")}
-            </div>
-          </button>
-        ))}
-      </div>
-
-      {!showAll && quickTimes.length > 3 && (
-        <button
-          type="button"
-          onClick={() => setShowAll(true)}
-          className="w-full py-2 text-slate-600 hover:text-slate-800 text-sm font-medium rounded-lg border border-dashed border-slate-300 hover:border-slate-400 transition-all duration-200"
-        >
-          Show more time options
-        </button>
-      )}
     </div>
   );
 };
@@ -919,10 +841,7 @@ const HistoryPanel = ({ isOpen, onClose, tasks }) => {
                 <strong>{getTimeWithTimezone(currentTime.utc, "UTC")}</strong>
               </span>
               <span>
-                Bangladesh:{" "}
-                <strong>
-                  {getTimeWithTimezone(currentTime.utc, BANGLADESH_TZ)}
-                </strong>
+                Your Time: <strong>{currentTime.userLocalTime}</strong>
               </span>
             </div>
           </div>
@@ -1006,7 +925,10 @@ const HistoryPanel = ({ isOpen, onClose, tasks }) => {
                         Completed
                       </span>
                       <span className="text-sm text-slate-500">
-                        {getTimeWithTimezone(entry.completedAt, BANGLADESH_TZ)}
+                        {formatForDisplay(
+                          entry.completedAt,
+                          currentTime.userTimezone
+                        )}
                       </span>
                     </div>
 
@@ -1038,14 +960,16 @@ const HistoryPanel = ({ isOpen, onClose, tasks }) => {
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-slate-500">
                         <div>
-                          <span className="font-medium">Original Due:</span>{" "}
-                          {getTimeWithTimezone(entry.dueUtc, BANGLADESH_TZ)}
+                          <span className="font-medium">
+                            Original Due (UTC):
+                          </span>{" "}
+                          {getTimeWithTimezone(entry.dueUtc, "UTC")}
                         </div>
                         <div>
                           <span className="font-medium">Completed:</span>{" "}
-                          {getTimeWithTimezone(
+                          {formatForDisplay(
                             entry.completedAt,
-                            BANGLADESH_TZ
+                            currentTime.userTimezone
                           )}
                         </div>
                       </div>
@@ -1066,10 +990,7 @@ const HistoryPanel = ({ isOpen, onClose, tasks }) => {
                 <strong>{getTimeWithTimezone(currentTime.utc, "UTC")}</strong>
               </span>
               <span>
-                BD:{" "}
-                <strong>
-                  {getTimeWithTimezone(currentTime.utc, BANGLADESH_TZ)}
-                </strong>
+                Your Time: <strong>{currentTime.userLocalTime}</strong>
               </span>
             </div>
           </div>
@@ -1199,7 +1120,7 @@ const TaskItem = ({ task, onToggle, onEdit, onDelete, onUpdate }) => {
                   value={editNotes}
                   onChange={(e) => setEditNotes(e.target.value)}
                   placeholder="Add notes..."
-                  className="w-full text-sm text-slate-600 border border-slate-300 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none transition-all duration-200"
+                  className="w-full text-sm text-slate-600 border border-slate-300 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
                   rows="3"
                 />
                 <div className="flex gap-2">
@@ -1346,7 +1267,7 @@ const TaskItem = ({ task, onToggle, onEdit, onDelete, onUpdate }) => {
                           <div className="space-y-3">
                             <div className="flex justify-between items-center p-3 bg-white rounded-lg border border-slate-200">
                               <span className="text-sm text-slate-600">
-                                UTC Time
+                                UTC Time (Stored)
                               </span>
                               <span className="font-mono text-sm font-semibold text-slate-900">
                                 {getTimeWithTimezone(task.dueUtc, "UTC")}
@@ -1354,23 +1275,12 @@ const TaskItem = ({ task, onToggle, onEdit, onDelete, onUpdate }) => {
                             </div>
                             <div className="flex justify-between items-center p-3 bg-white rounded-lg border border-slate-200">
                               <span className="text-sm text-slate-600">
-                                Bangladesh Time
-                              </span>
-                              <span className="font-mono text-sm font-semibold text-emerald-600">
-                                {getTimeWithTimezone(
-                                  task.dueUtc,
-                                  BANGLADESH_TZ
-                                )}
-                              </span>
-                            </div>
-                            <div className="flex justify-between items-center p-3 bg-white rounded-lg border border-slate-200">
-                              <span className="text-sm text-slate-600">
                                 Your Local Time
                               </span>
-                              <span className="font-mono text-sm font-semibold text-blue-600">
+                              <span className="font-mono text-sm font-semibold text-emerald-600">
                                 {formatForDisplay(
                                   task.dueUtc,
-                                  BANGLADESH_TZ,
+                                  currentTime.userTimezone,
                                   true
                                 )}
                               </span>
@@ -1532,6 +1442,73 @@ const IOSInstallGuide = ({ isIOS, isStandalone }) => {
   );
 };
 
+// Notification Actions Component
+const NotificationActions = ({
+  permission,
+  requestPermission,
+  testNotification,
+  isSupported,
+}) => {
+  if (!isSupported) {
+    return (
+      <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
+        <div className="flex items-center gap-2 text-amber-800">
+          <span>⚠️</span>
+          <span>Push notifications not supported in this browser</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <button
+        onClick={requestPermission}
+        disabled={permission === "granted"}
+        className={`w-full flex items-center gap-3 px-4 py-3 text-left rounded-xl transition-all duration-200 border ${
+          permission === "granted"
+            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+            : "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
+        }`}
+      >
+        <span className="text-lg">
+          {permission === "granted" ? "🔔" : "🔕"}
+        </span>
+        <div className="flex-1">
+          <div className="font-medium">
+            {permission === "granted"
+              ? "Notifications Enabled"
+              : "Enable Push Notifications"}
+          </div>
+          <div className="text-xs opacity-75">
+            {permission === "granted"
+              ? "You'll receive browser notifications for due tasks"
+              : "Get reminders for upcoming tasks"}
+          </div>
+        </div>
+        {permission === "granted" && (
+          <span className="text-emerald-500">✓</span>
+        )}
+      </button>
+
+      {permission === "granted" && (
+        <button
+          onClick={testNotification}
+          className="w-full flex items-center gap-3 px-4 py-3 text-left rounded-xl transition-all duration-200 border bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100"
+        >
+          <span className="text-lg">🧪</span>
+          <div className="flex-1">
+            <div className="font-medium">Test Push Notifications</div>
+            <div className="text-xs opacity-75">
+              Send test notifications to check how they look
+            </div>
+          </div>
+        </button>
+      )}
+    </div>
+  );
+};
+
 // ---------------------- Main Component ----------------------
 
 export default function TodoApp() {
@@ -1558,13 +1535,19 @@ export default function TodoApp() {
 
   // PWA Hooks
   const { isStandalone, supportsPWA, deferredPrompt, installPWA } = usePWA();
+
+  // Push Notification Hooks
   const {
     permission: notificationPermission,
     requestPermission,
-    isIOS,
-  } = useIOSNotifications();
+    isSupported,
+    testNotification,
+    showTaskCompleted,
+  } = usePushNotifications();
+
   const { permission: enhancedNotificationPermission } =
     useEnhancedNotifications(activeTasks);
+
   const currentTime = useLiveTime();
 
   // Find next upcoming task from active tasks only
@@ -1650,6 +1633,37 @@ export default function TodoApp() {
     [tasks, activeTasks]
   );
 
+  // Create test task function
+  const createTestTask = () => {
+    const testDueDate = new Date(Date.now() + 15000); // 15 seconds from now
+
+    const testTask = {
+      id: genId(),
+      title: "TEST TASK - Notification Test",
+      notes:
+        "This is a test task to check notifications. It will trigger reminders at 10 seconds, 30 seconds, etc.",
+      clientName: "Test Client",
+      clientCountry: "Test Country",
+      dueUtc: testDueDate.toISOString(),
+      completed: false,
+      createdAtUtc: nowUtcIso(),
+    };
+
+    setTasks((prev) => [testTask, ...prev]);
+    addToHistory("created", testTask);
+
+    setTitle("");
+    setNotes("");
+    setClientName("");
+    setClientCountry("");
+    setDueLocalInputValue(utcIsoToLocalInputValue(testDueDate.toISOString()));
+
+    addToast(
+      "Test task created! Due in 15 seconds. Notifications will trigger automatically.",
+      "success"
+    );
+  };
+
   // Unified clear history function
   const clearCompleted = () => {
     if (
@@ -1689,7 +1703,7 @@ export default function TodoApp() {
     try {
       let dueUtc = null;
       if (dueLocalInputValue) {
-        dueUtc = datetimeLocalToUtcIso(dueLocalInputValue, interpretAsUtc);
+        dueUtc = datetimeLocalToUtcIso(dueLocalInputValue);
       }
 
       const newTask = {
@@ -1743,6 +1757,11 @@ export default function TodoApp() {
             // When marking as completed, add to history and it will disappear from main list
             addToHistory("completed", updated);
             addToast(`Task completed: "${updated.title}"`, "success");
+
+            // Show push notification for completed task
+            if (notificationPermission === "granted") {
+              showTaskCompleted(updated);
+            }
           } else {
             // When un-completing, it will reappear in main list
             addToHistory("uncompleted", updated);
@@ -1772,8 +1791,7 @@ export default function TodoApp() {
         tasks,
         history: JSON.parse(localStorage.getItem(HISTORY_STORAGE_KEY) || "[]"),
         exportedAt: nowUtcIso(),
-        bangladeshTime: getBangladeshTime(nowUtcIso()),
-        utcTime: getUtcTime(nowUtcIso()),
+        utcTime: getTimeWithTimezone(nowUtcIso(), "UTC"),
       };
 
       const blob = new Blob([JSON.stringify(data, null, 2)], {
@@ -1844,49 +1862,6 @@ export default function TodoApp() {
     reader.readAsText(file);
   };
 
-  const requestNotifications = async () => {
-    if (!("Notification" in window)) {
-      addToast("Notifications not supported in this browser", "warning");
-      return;
-    }
-
-    if (Notification.permission === "granted") {
-      addToast("Notifications already enabled", "info");
-      return;
-    }
-
-    try {
-      // Use the enhanced permission request
-      const result = await requestPermission();
-
-      if (result === "granted") {
-        addToast("Notifications enabled successfully!", "success");
-
-        // Show welcome notification
-        if ("Notification" in window && Notification.permission === "granted") {
-          new Notification("🔔 ChronoTask Pro", {
-            body: "You will receive smart reminders before tasks are due",
-            icon: "/icons/icon-192.png",
-            badge: "/icons/badge-72.png",
-            tag: "welcome",
-          });
-        }
-      } else if (result === "denied") {
-        addToast(
-          "Notifications blocked. Please enable them in your browser settings to receive reminders.",
-          "warning"
-        );
-      }
-    } catch (error) {
-      console.error("Notification error:", error);
-      addToast("Failed to enable notifications", "error");
-    }
-  };
-
-  const handleQuickTimeSelect = (date) => {
-    setDueLocalInputValue(utcIsoToLocalInputValue(date.toISOString()));
-  };
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50/30 p-4 safe-area-inset">
       {/* Toast Container */}
@@ -1910,7 +1885,7 @@ export default function TodoApp() {
       />
 
       {/* iOS Install Guide */}
-      <IOSInstallGuide isIOS={isIOS} isStandalone={isStandalone} />
+      <IOSInstallGuide isIOS={false} isStandalone={isStandalone} />
 
       {/* History Panel */}
       <HistoryPanel
@@ -1967,11 +1942,7 @@ export default function TodoApp() {
                     </div>
                   )}
                   <p className="text-blue-100">
-                    Due:{" "}
-                    {getTimeWithTimezone(
-                      nextUpcomingTask.dueUtc,
-                      BANGLADESH_TZ
-                    )}
+                    Due: {getTimeWithTimezone(nextUpcomingTask.dueUtc, "UTC")}
                   </p>
                 </div>
                 <CountdownTimer
@@ -2108,12 +2079,12 @@ export default function TodoApp() {
                     <div className="flex items-center gap-2 text-sm text-blue-700">
                       <span>⏰</span>
                       <div>
-                        <strong>Setting UTC Time</strong> - This will be
-                        converted to your local time for display
+                        <strong>UTC Time Standard</strong> - All times are
+                        stored in UTC for global consistency
                         <div className="text-xs opacity-75 mt-1">
                           Current UTC: {getTimeWithTimezone(nowUtcIso(), "UTC")}{" "}
-                          | Your Local:{" "}
-                          {formatForDisplay(nowUtcIso(), BANGLADESH_TZ, true)}
+                          | Your Local: {currentTime.userLocalTime} (
+                          {currentTime.userTimezone})
                         </div>
                       </div>
                     </div>
@@ -2140,10 +2111,7 @@ export default function TodoApp() {
                             <span>
                               UTC:{" "}
                               {getTimeWithTimezone(
-                                datetimeLocalToUtcIso(
-                                  dueLocalInputValue,
-                                  interpretAsUtc
-                                ),
+                                datetimeLocalToUtcIso(dueLocalInputValue),
                                 "UTC"
                               )}
                             </span>
@@ -2151,26 +2119,10 @@ export default function TodoApp() {
                           <div className="flex items-center gap-2">
                             <span className="w-2 h-2 bg-emerald-500 rounded-full"></span>
                             <span>
-                              Bangladesh:{" "}
-                              {getTimeWithTimezone(
-                                datetimeLocalToUtcIso(
-                                  dueLocalInputValue,
-                                  interpretAsUtc
-                                ),
-                                BANGLADESH_TZ
-                              )}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className="w-2 h-2 bg-purple-500 rounded-full"></span>
-                            <span>
                               Your Local:{" "}
                               {formatForDisplay(
-                                datetimeLocalToUtcIso(
-                                  dueLocalInputValue,
-                                  interpretAsUtc
-                                ),
-                                BANGLADESH_TZ,
+                                datetimeLocalToUtcIso(dueLocalInputValue),
+                                currentTime.userTimezone,
                                 true
                               )}
                             </span>
@@ -2179,11 +2131,6 @@ export default function TodoApp() {
                       </div>
                     </div>
                   )}
-
-                  <QuickTimeButtons
-                    onTimeSelect={handleQuickTimeSelect}
-                    currentValue={dueLocalInputValue}
-                  />
 
                   <div className="flex items-center gap-3 mt-3 p-3 bg-slate-50 rounded-xl border border-slate-200">
                     <input
@@ -2228,33 +2175,24 @@ export default function TodoApp() {
               </div>
 
               <div className="space-y-3">
+                <NotificationActions
+                  permission={notificationPermission}
+                  requestPermission={requestPermission}
+                  testNotification={testNotification}
+                  isSupported={isSupported}
+                />
+
                 <button
-                  onClick={requestNotifications}
-                  disabled={notificationPermission === "granted"}
-                  className={`w-full flex items-center gap-3 px-4 py-3 text-left rounded-xl transition-all duration-200 border ${
-                    notificationPermission === "granted"
-                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                      : "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
-                  }`}
+                  onClick={createTestTask}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-left rounded-xl transition-all duration-200 border bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
                 >
-                  <span className="text-lg">
-                    {notificationPermission === "granted" ? "🔔" : "🔕"}
-                  </span>
+                  <span className="text-lg">⚡</span>
                   <div className="flex-1">
-                    <div className="font-medium">
-                      {notificationPermission === "granted"
-                        ? "Notifications Enabled"
-                        : "Enable Notifications"}
+                    <div className="font-medium">Create Test Task</div>
+                    <div className="text-xs opacity-75">
+                      Create a task due in 15 seconds to test notifications
                     </div>
-                    {isIOS && notificationPermission !== "granted" && (
-                      <div className="text-xs opacity-75">
-                        Essential for task reminders on iOS
-                      </div>
-                    )}
                   </div>
-                  {notificationPermission === "granted" && (
-                    <span className="text-emerald-500">✓</span>
-                  )}
                 </button>
 
                 <div className="grid grid-cols-2 gap-2">
@@ -2418,7 +2356,7 @@ export default function TodoApp() {
               <div className="flex items-center gap-2">
                 <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
                 <span>
-                  Live UTC:{" "}
+                  UTC:{" "}
                   <strong className="font-mono">
                     {getTimeWithTimezone(currentTime.utc, "UTC")}
                   </strong>
@@ -2427,9 +2365,9 @@ export default function TodoApp() {
               <div className="flex items-center gap-2">
                 <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
                 <span>
-                  Live Bangladesh:{" "}
+                  Your Time:{" "}
                   <strong className="font-mono">
-                    {getTimeWithTimezone(currentTime.utc, BANGLADESH_TZ)}
+                    {currentTime.userLocalTime}
                   </strong>
                 </span>
               </div>
@@ -2442,6 +2380,11 @@ export default function TodoApp() {
             {isStandalone && (
               <p className="text-emerald-600 font-medium mt-2">
                 📱 Running as Installed App
+              </p>
+            )}
+            {isSupported && notificationPermission === "granted" && (
+              <p className="text-green-600 font-medium mt-1">
+                🔔 Push Notifications Enabled
               </p>
             )}
           </div>
