@@ -3,7 +3,6 @@
 // -------------------------------------------------------------------------
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import Push from "push.js";
 
 // ---------------------- Constants ----------------------
 
@@ -222,45 +221,106 @@ const usePWA = () => {
   return { isStandalone, supportsPWA, deferredPrompt, installPWA };
 };
 
-// Enhanced Push.js Notification Hook
+// Enhanced Mobile-Compatible Notification Hook
 const usePushNotifications = () => {
   const [permission, setPermission] = useState("default");
-  const [isSupported, setIsSupported] = useState(true);
+  const [isSupported, setIsSupported] = useState(false);
   const [isIOS, setIsIOS] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
 
   useEffect(() => {
-    // Check if Push.js is supported
-    const pushSupported = typeof Push !== "undefined" && Push.Permission.has();
-    setIsSupported(pushSupported);
+    // Check if notifications are supported
+    const notificationSupported = "Notification" in window;
+    setIsSupported(notificationSupported);
 
-    // Set initial permission state
-    if (pushSupported) {
-      setPermission(Push.Permission.get());
-    } else if ("Notification" in window) {
+    if (notificationSupported) {
       setPermission(Notification.permission);
     }
 
-    // Detect iOS
+    // Detect iOS and mobile devices
     const userAgent = window.navigator.userAgent.toLowerCase();
     setIsIOS(/iphone|ipad|ipod/.test(userAgent));
+    setIsMobile(
+      /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(
+        userAgent
+      )
+    );
+
+    console.log("Notification Support:", {
+      supported: notificationSupported,
+      permission: Notification.permission,
+      isIOS,
+      isMobile,
+      userAgent: window.navigator.userAgent,
+    });
   }, []);
 
   const requestPermission = async () => {
     try {
-      if (typeof Push !== "undefined" && Push.Permission.has()) {
-        await Push.Permission.request();
-        const newPermission = Push.Permission.get();
-        setPermission(newPermission);
-        return newPermission;
-      } else if ("Notification" in window) {
+      if (!isSupported) {
+        console.warn("Notifications not supported in this browser");
+        return "denied";
+      }
+
+      // Special handling for iOS/mobile
+      if (isMobile) {
+        console.log("Mobile device detected - using native permission request");
+
+        // On mobile, we need to check if we're in a secure context
+        if (window.isSecureContext) {
+          const result = await Notification.requestPermission();
+          setPermission(result);
+
+          // Show helpful message based on result
+          if (window.addToast) {
+            if (result === "granted") {
+              window.addToast(
+                "Notifications enabled! You'll receive reminders for your tasks.",
+                "success"
+              );
+            } else if (result === "denied") {
+              window.addToast(
+                "Notifications blocked. Please enable them in your browser settings.",
+                "warning"
+              );
+            }
+          }
+
+          return result;
+        } else {
+          console.warn("Notifications require HTTPS on mobile devices");
+          if (window.addToast) {
+            window.addToast(
+              "Notifications require a secure connection (HTTPS) on mobile devices",
+              "warning"
+            );
+          }
+          return "denied";
+        }
+      } else {
+        // Desktop browsers
         const result = await Notification.requestPermission();
         setPermission(result);
+
+        if (window.addToast) {
+          if (result === "granted") {
+            window.addToast("Notifications enabled successfully!", "success");
+          }
+        }
+
         return result;
       }
     } catch (error) {
       console.error("Permission request failed:", error);
+
+      // Fallback for older browsers
+      if (Notification.permission) {
+        setPermission(Notification.permission);
+        return Notification.permission;
+      }
+
+      return "denied";
     }
-    return "denied";
   };
 
   const showNotification = (title, options = {}) => {
@@ -269,35 +329,78 @@ const usePushNotifications = () => {
       return null;
     }
 
-    const defaultOptions = {
-      icon: "/icons/icon-192.png",
-      timeout: 5000,
-      onClick: () => {
-        window.focus();
-        // You can add custom click handling here
-      },
-    };
-
-    // Use Push.js if available, fallback to native API
-    if (typeof Push !== "undefined" && Push.Permission.has()) {
-      return Push.create(title, {
-        ...defaultOptions,
-        ...options,
-      });
-    } else if ("Notification" in window) {
-      // iOS-specific options for native notifications
-      const nativeOptions = { ...defaultOptions, ...options };
-      if (isIOS) {
-        nativeOptions.silent = false;
-        nativeOptions.vibrate = [200, 100, 200];
-      }
-      return new Notification(title, nativeOptions);
+    if (!isSupported) {
+      console.warn("Notifications not supported");
+      return null;
     }
 
-    return null;
+    try {
+      const defaultOptions = {
+        icon: "/icons/icon-192.png",
+        badge: "/icons/icon-72.png",
+        tag: `notification-${Date.now()}`,
+        requireInteraction: false,
+        silent: false,
+      };
+
+      // Mobile-specific optimizations
+      if (isMobile) {
+        defaultOptions.silent = false;
+
+        // Vibration pattern for mobile devices
+        if ("vibrate" in navigator) {
+          defaultOptions.vibrate = [200, 100, 200];
+        }
+
+        // Shorter timeout for mobile
+        defaultOptions.requireInteraction = false;
+      }
+
+      const notificationOptions = {
+        ...defaultOptions,
+        ...options,
+        // Ensure body is properly handled
+        body: options.body || "",
+      };
+
+      // Use native Notification API
+      const notification = new Notification(title, notificationOptions);
+
+      // Handle click events
+      notification.onclick = () => {
+        window.focus();
+        notification.close();
+
+        // Custom click handling
+        if (options.onClick) {
+          options.onClick();
+        }
+      };
+
+      // Handle close events
+      notification.onclose = () => {
+        if (options.onClose) {
+          options.onClose();
+        }
+      };
+
+      // Auto-close after timeout (except for urgent notifications)
+      if (!options.requireInteraction && options.timeout !== 0) {
+        setTimeout(() => {
+          if (notification.close) {
+            notification.close();
+          }
+        }, options.timeout || 5000);
+      }
+
+      return notification;
+    } catch (error) {
+      console.error("Failed to show notification:", error);
+      return null;
+    }
   };
 
-  // Specialized notification methods for your Todo app
+  // Specialized notification methods
   const showTaskReminder = (task, timeLeft) => {
     let config = {};
 
@@ -311,13 +414,22 @@ const usePushNotifications = () => {
         requireInteraction: true,
         timeout: 0, // Don't auto-close urgent notifications
       };
+
+      // Strong vibration pattern for urgent (mobile only)
+      if (isMobile && "vibrate" in navigator) {
+        config.vibrate = [300, 100, 300, 100, 300];
+      }
     } else if (timeLeft <= 30) {
       config = {
         body: `⚠️ 30 seconds left\nClient: ${task.clientName || "N/A"}`,
         icon: "/icons/warning.png",
         tag: `warning-${task.id}`,
-        timeout: 10000, // 10 seconds
+        timeout: 10000,
       };
+
+      if (isMobile && "vibrate" in navigator) {
+        config.vibrate = [200, 100, 200];
+      }
     } else {
       config = {
         body: `Due: ${formatForDisplay(task.dueUtc, "UTC", true)}\nClient: ${
@@ -326,22 +438,45 @@ const usePushNotifications = () => {
         icon: "/icons/reminder.png",
         tag: `reminder-${task.id}`,
       };
+
+      if (isMobile && "vibrate" in navigator) {
+        config.vibrate = [100];
+      }
     }
 
     return showNotification(`⏰ ${task.title}`, config);
   };
 
   const showTaskCompleted = (task) => {
-    return showNotification("✅ Task Completed", {
+    const config = {
       body: `"${task.title}" has been completed!`,
       icon: "/icons/completed.png",
       tag: `completed-${task.id}`,
-    });
+    };
+
+    if (isMobile && "vibrate" in navigator) {
+      config.vibrate = [100, 50, 100];
+    }
+
+    return showNotification("✅ Task Completed", config);
   };
 
   const testNotification = () => {
     if (permission !== "granted") {
       console.warn("Please enable notifications first");
+      if (window.addToast) {
+        window.addToast("Please enable notifications first", "warning");
+      }
+      return;
+    }
+
+    if (!isSupported) {
+      if (window.addToast) {
+        window.addToast(
+          "Notifications not supported in this browser",
+          "warning"
+        );
+      }
       return;
     }
 
@@ -359,12 +494,17 @@ const usePushNotifications = () => {
         icon: "/icons/reminder.png",
       });
     }, 1000);
+
+    if (window.addToast) {
+      window.addToast("Test notifications sent!", "success");
+    }
   };
 
   return {
     permission,
     isSupported,
     isIOS,
+    isMobile,
     requestPermission,
     showNotification,
     showTaskReminder,
@@ -373,7 +513,7 @@ const usePushNotifications = () => {
   };
 };
 
-// Enhanced notification system with Push.js
+// Enhanced notification system with mobile support
 const useEnhancedNotifications = (activeTasks) => {
   const { permission, showTaskReminder, isSupported } = usePushNotifications();
 
@@ -411,7 +551,7 @@ const useEnhancedNotifications = (activeTasks) => {
             ) {
               console.log(`Triggering notification: ${notificationKey}`);
 
-              // Use the enhanced Push.js notification
+              // Use the enhanced notification
               showTaskReminder(task, secondsLeft);
 
               notifiedTasksRef.current.add(notificationKey);
@@ -1448,13 +1588,22 @@ const NotificationActions = ({
   requestPermission,
   testNotification,
   isSupported,
+  isMobile,
 }) => {
   if (!isSupported) {
     return (
       <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
         <div className="flex items-center gap-2 text-amber-800">
           <span>⚠️</span>
-          <span>Push notifications not supported in this browser</span>
+          <div>
+            <span>Push notifications not supported in this browser</span>
+            {isMobile && (
+              <div className="text-xs mt-1">
+                Mobile browsers may require HTTPS and user gesture to enable
+                notifications
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -1462,6 +1611,15 @@ const NotificationActions = ({
 
   return (
     <div className="space-y-3">
+      {isMobile && (
+        <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl">
+          <div className="text-sm text-blue-700">
+            <strong>Mobile Note:</strong> Notifications work best with HTTPS and
+            may require explicit permission.
+          </div>
+        </div>
+      )}
+
       <button
         onClick={requestPermission}
         disabled={permission === "granted"}
@@ -1541,6 +1699,7 @@ export default function TodoApp() {
     permission: notificationPermission,
     requestPermission,
     isSupported,
+    isMobile,
     testNotification,
     showTaskCompleted,
   } = usePushNotifications();
@@ -1567,6 +1726,14 @@ export default function TodoApp() {
   const removeToast = (id) => {
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
   };
+
+  // Make addToast available globally for the notification hook
+  useEffect(() => {
+    window.addToast = addToast;
+    return () => {
+      delete window.addToast;
+    };
+  }, []);
 
   const filteredTasks = useMemo(() => {
     let arr = activeTasks.slice(); // Only show active tasks
@@ -2180,6 +2347,7 @@ export default function TodoApp() {
                   requestPermission={requestPermission}
                   testNotification={testNotification}
                   isSupported={isSupported}
+                  isMobile={isMobile}
                 />
 
                 <button
@@ -2385,6 +2553,11 @@ export default function TodoApp() {
             {isSupported && notificationPermission === "granted" && (
               <p className="text-green-600 font-medium mt-1">
                 🔔 Push Notifications Enabled
+              </p>
+            )}
+            {isMobile && (
+              <p className="text-blue-600 font-medium mt-1">
+                📱 Mobile Browser Detected
               </p>
             )}
           </div>
