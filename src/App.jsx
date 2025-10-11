@@ -221,6 +221,39 @@ const usePWA = () => {
   return { isStandalone, supportsPWA, deferredPrompt, installPWA };
 };
 
+// Service Worker Notification Function
+const triggerServiceWorkerNotification = async (title, options = {}) => {
+  if (
+    "serviceWorker" in navigator &&
+    "Notification" in window &&
+    Notification.permission === "granted"
+  ) {
+    try {
+      const registration = await navigator.serviceWorker.ready;
+
+      // Send message to service worker to show notification
+      if (registration.active) {
+        registration.active.postMessage({
+          type: "SHOW_NOTIFICATION",
+          title,
+          options: {
+            ...options,
+            timestamp: Date.now(),
+          },
+        });
+      }
+
+      console.log("Notification sent to service worker");
+      return { close: () => {} }; // Return dummy object for consistency
+    } catch (error) {
+      console.error("Failed to send notification to service worker:", error);
+      // Fallback to direct notification
+      return new Notification(title, options);
+    }
+  }
+  return null;
+};
+
 // Enhanced Mobile-Compatible Notification Hook
 const usePushNotifications = () => {
   const [permission, setPermission] = useState("default");
@@ -335,65 +368,66 @@ const usePushNotifications = () => {
     }
 
     try {
-      const defaultOptions = {
-        icon: "/icons/icon-192.png",
-        badge: "/icons/icon-72.png",
-        tag: `notification-${Date.now()}`,
-        requireInteraction: false,
-        silent: false,
-      };
+      // Try service worker first for better PWA support
+      if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+        return triggerServiceWorkerNotification(title, options);
+      } else {
+        // Fallback to direct Notification API
+        const defaultOptions = {
+          icon: "/icons/icon-192.png",
+          badge: "/icons/icon-72.png",
+          tag: `notification-${Date.now()}`,
+          requireInteraction: false,
+          silent: false,
+        };
 
-      // Mobile-specific optimizations
-      if (isMobile) {
-        defaultOptions.silent = false;
-
-        // Vibration pattern for mobile devices
-        if ("vibrate" in navigator) {
-          defaultOptions.vibrate = [200, 100, 200];
-        }
-
-        // Shorter timeout for mobile
-        defaultOptions.requireInteraction = false;
-      }
-
-      const notificationOptions = {
-        ...defaultOptions,
-        ...options,
-        // Ensure body is properly handled
-        body: options.body || "",
-      };
-
-      // Use native Notification API
-      const notification = new Notification(title, notificationOptions);
-
-      // Handle click events
-      notification.onclick = () => {
-        window.focus();
-        notification.close();
-
-        // Custom click handling
-        if (options.onClick) {
-          options.onClick();
-        }
-      };
-
-      // Handle close events
-      notification.onclose = () => {
-        if (options.onClose) {
-          options.onClose();
-        }
-      };
-
-      // Auto-close after timeout (except for urgent notifications)
-      if (!options.requireInteraction && options.timeout !== 0) {
-        setTimeout(() => {
-          if (notification.close) {
-            notification.close();
+        // Mobile-specific optimizations
+        if (isMobile) {
+          defaultOptions.silent = false;
+          if ("vibrate" in navigator) {
+            defaultOptions.vibrate = [200, 100, 200];
           }
-        }, options.timeout || 5000);
-      }
+          defaultOptions.requireInteraction = false;
+        }
 
-      return notification;
+        const notificationOptions = {
+          ...defaultOptions,
+          ...options,
+          body: options.body || "",
+        };
+
+        // Use native Notification API
+        const notification = new Notification(title, notificationOptions);
+
+        // Handle click events
+        notification.onclick = () => {
+          window.focus();
+          notification.close();
+
+          // Custom click handling
+          if (options.onClick) {
+            options.onClick();
+          }
+        };
+
+        // Handle close events
+        notification.onclose = () => {
+          if (options.onClose) {
+            options.onClose();
+          }
+        };
+
+        // Auto-close after timeout (except for urgent notifications)
+        if (!options.requireInteraction && options.timeout !== 0) {
+          setTimeout(() => {
+            if (notification.close) {
+              notification.close();
+            }
+          }, options.timeout || 5000);
+        }
+
+        return notification;
+      }
     } catch (error) {
       console.error("Failed to show notification:", error);
       return null;
@@ -480,14 +514,23 @@ const usePushNotifications = () => {
       return;
     }
 
-    // Test different notification types
-    showNotification("🔔 Test - Urgent Task", {
-      body: "This is an urgent notification test",
-      icon: "/icons/urgent.png",
-      requireInteraction: true,
-      timeout: 0,
-    });
+    // Test service worker notification capability
+    if ("serviceWorker" in navigator) {
+      // Test through service worker
+      showNotification("🔔 Test - Service Worker Notification", {
+        body: "This notification is sent through the Service Worker",
+        icon: "/icons/icon-192.png",
+        requireInteraction: true,
+      });
+    } else {
+      // Fallback to direct notifications
+      showNotification("🔔 Test - Direct Notification", {
+        body: "This is a direct browser notification",
+        icon: "/icons/icon-192.png",
+      });
+    }
 
+    // Test different notification types
     setTimeout(() => {
       showNotification("⏰ Test - Regular Reminder", {
         body: "This is a regular reminder test",
@@ -1735,6 +1778,43 @@ export default function TodoApp() {
     };
   }, []);
 
+  // Handle service worker messages
+  useEffect(() => {
+    // Handle messages from service worker
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.addEventListener("message", (event) => {
+        if (event.data && event.data.type === "NOTIFICATION_CLICKED") {
+          console.log("Notification clicked:", event.data);
+          // You can handle specific notification actions here
+          if (event.data.taskId) {
+            // Focus on the specific task if needed
+            addToast(
+              `Notification clicked for task ${event.data.taskId}`,
+              "info"
+            );
+          }
+        }
+      });
+    }
+
+    // Test service worker notification capability
+    const testServiceWorkerNotification = async () => {
+      if (
+        "serviceWorker" in navigator &&
+        Notification.permission === "granted"
+      ) {
+        try {
+          const registration = await navigator.serviceWorker.ready;
+          console.log("Service Worker ready for notifications:", registration);
+        } catch (error) {
+          console.error("Service Worker notification test failed:", error);
+        }
+      }
+    };
+
+    testServiceWorkerNotification();
+  }, []);
+
   const filteredTasks = useMemo(() => {
     let arr = activeTasks.slice(); // Only show active tasks
 
@@ -2558,6 +2638,11 @@ export default function TodoApp() {
             {isMobile && (
               <p className="text-blue-600 font-medium mt-1">
                 📱 Mobile Browser Detected
+              </p>
+            )}
+            {"serviceWorker" in navigator && (
+              <p className="text-purple-600 font-medium mt-1">
+                ⚙️ Service Worker Active
               </p>
             )}
           </div>
